@@ -146,7 +146,7 @@ def masked_loss(y_true, y_pred):
     """cross-entropy that ignores <pad> positions"""
     loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
     mask = keras.ops.cast(keras.ops.not_equal(y_true, 0), loss.dtype)
-    return keras.ops.sum(loss * mask) / keras.ops.maximum(keras.ops.sum(mask), 1.0)
+    return keras.ops.sum(loss * mask, axis=-1) / keras.ops.maximum(keras.ops.sum(mask, axis=-1), 1.0)
 
 
 @keras.utils.register_keras_serializable(package="cipher")
@@ -173,7 +173,7 @@ def build_model(vocab_size, max_in, max_out, emb, hid):
     _, state_h, state_c = LSTM(hid, return_state=True)(enc_emb)
 
     # decoder: writes the plaintext one character at a time
-    dec_emb = Embedding(vocab_size, emb, mask_zero=True)(dec_in)
+    dec_emb = Embedding(vocab_size, emb)(dec_in)
     dec_seq = LSTM(hid, return_sequences=True)(
         dec_emb, initial_state=[state_h, state_c]
     )

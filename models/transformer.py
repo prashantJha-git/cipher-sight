@@ -184,7 +184,7 @@ def masked_loss(y_true, y_pred):
     """cross-entropy that ignores <pad> positions"""
     loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
     mask = keras.ops.cast(keras.ops.not_equal(y_true, 0), loss.dtype)
-    return keras.ops.sum(loss * mask) / keras.ops.maximum(keras.ops.sum(mask), 1.0)
+    return keras.ops.sum(loss * mask, axis=-1) / keras.ops.maximum(keras.ops.sum(mask, axis=-1), 1.0)
 
 
 @keras.utils.register_keras_serializable(package="cipher")
