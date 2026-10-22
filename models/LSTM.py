@@ -4,12 +4,15 @@ import time
 import random
 import argparse
 
+import tensorflow as tf
+from tensorflow import keras
+
 from pathlib import Path
 from rapidfuzz.distance import Levenshtein
 from tabulate import tabulate
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = BASE_DIR / "data" if (BASE_DIR / "data").exists() else BASE_DIR.parent / "data"
 RESULTS_DIR = BASE_DIR / "model_results" / "LSTM"
 
 CIPHER_FILES = {
@@ -137,13 +140,33 @@ def make_arrays(frame, max_in, max_out):
     tgt = np.array([encode(list(s) + [EOS], max_out) for s in frame.plaintext])
     return enc, dec_in, tgt
 
+
+@keras.utils.register_keras_serializable(package="cipher")
+def masked_loss(y_true, y_pred):
+    """cross-entropy that ignores <pad> positions"""
+    loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+    mask = keras.ops.cast(keras.ops.not_equal(y_true, 0), loss.dtype)
+    return keras.ops.sum(loss * mask) / keras.ops.maximum(keras.ops.sum(mask), 1.0)
+
+
+@keras.utils.register_keras_serializable(package="cipher")
+def masked_accuracy(y_true, y_pred):
+    """per-character accuracy that ignores <pad> positions"""
+    y_true = keras.ops.cast(y_true, "int32")
+    hit = keras.ops.cast(
+        keras.ops.equal(y_true, keras.ops.argmax(y_pred, axis=-1)),
+        "float32",
+    )
+    mask = keras.ops.cast(keras.ops.not_equal(y_true, 0), "float32")
+    return keras.ops.sum(hit * mask) / keras.ops.maximum(keras.ops.sum(mask), 1.0)
+
+
 # LSTM MODEL ->
 def build_model(vocab_size, max_in, max_out, emb, hid):
     from tensorflow.keras.layers import Input, Embedding, LSTM, Dense
-    from tensorflow.keras.models import Model
 
-    enc_in = Input(shape=(max_in,))
-    dec_in = Input(shape=(max_out,))
+    enc_in = Input(shape=(max_in,), dtype="int32")
+    dec_in = Input(shape=(max_out,), dtype="int32")
 
     # encoder: reads the ciphertext, hands its final state to the decoder
     enc_emb = Embedding(vocab_size, emb, mask_zero=True)(enc_in)
@@ -151,13 +174,16 @@ def build_model(vocab_size, max_in, max_out, emb, hid):
 
     # decoder: writes the plaintext one character at a time
     dec_emb = Embedding(vocab_size, emb, mask_zero=True)(dec_in)
-    dec_seq = LSTM(hid, return_sequences=True)(dec_emb, initial_state=[state_h, state_c])
+    dec_seq = LSTM(hid, return_sequences=True)(
+        dec_emb, initial_state=[state_h, state_c]
+    )
     out = Dense(vocab_size, activation="softmax")(dec_seq)
-    return Model([enc_in, dec_in], out)
+    return keras.Model([enc_in, dec_in], out)
 
 def predict_chunks(model, enc, dec, chunk=512):
     """run model predictions in batches and combine the output arrays"""
-    import tensorflow as tf
+    if enc.shape[0] == 0:
+        return np.empty((0, dec.shape[1], V), dtype=np.float32)
     if not hasattr(model, "_fast_predict"):
         model._fast_predict = tf.function(
             lambda e, d: model([e, d], training=False), reduce_retracing=True)
@@ -170,6 +196,8 @@ def predict_chunks(model, enc, dec, chunk=512):
 
 def decode_batch(model, enc, max_out):
     """greedy decoding many ciphertexts at once"""
+    if max_out < 2:
+        raise ValueError("max_out must allow at least one character and an EOS token")
     n = enc.shape[0]
     dec = np.zeros((n, max_out), dtype=np.int32)
     dec[:, 0] = STOI[BOS]
@@ -177,6 +205,7 @@ def decode_batch(model, enc, max_out):
     done = np.zeros(n, dtype=bool)
     for t in range(1, max_out):
         probs = predict_chunks(model, enc, dec)[:, t - 1, :]
+        probs[:, STOI[BOS]] = -np.inf
         nxt = probs.argmax(axis=1).astype(np.int32)
         nxt[done] = STOI[PAD]
         out[:, t - 1] = nxt
@@ -196,7 +225,6 @@ def decode_batch(model, enc, max_out):
 
 # TRAINING MODEL ON EACH CIPHER ->
 def run_cipher(cipher, args, index, all_sentences):
-    import tensorflow as tf
     from tensorflow.keras.callbacks import EarlyStopping, CSVLogger
 
     # fresh seed + fresh graph, so ciphers never share weights or state
@@ -218,6 +246,11 @@ def run_cipher(cipher, args, index, all_sentences):
     train = df[df.split == "train"]
     valid = df[df.split == "valid"]
     test = df[df.split == "test"]
+    if train.empty or valid.empty or test.empty:
+        raise ValueError(
+            f"{cipher} needs non-empty train, validation, and test splits; "
+            "check the data or increase --limit"
+        )
 
     max_in = int(df.ciphertext.str.len().max())
     max_out = int(df.plaintext.str.len().max()) + 1 # +1 for EOS
@@ -227,8 +260,11 @@ def run_cipher(cipher, args, index, all_sentences):
     te_enc, _, _ = make_arrays(test, max_in, max_out)
 
     model = build_model(V, max_in, max_out, args.emb, args.hid)
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy",
-                  metrics=["accuracy"])
+    model.compile(
+        optimizer="adam",
+        loss=masked_loss,
+        metrics=[masked_accuracy],
+    )
 
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
@@ -263,7 +299,7 @@ def run_cipher(cipher, args, index, all_sentences):
         "train": len(train), "valid": len(valid), "test": len(test),
         "dropped": dropped,
         "epochs_run": len(hist["loss"]),
-        "best_val_acc": round(hist["val_accuracy"][best_epoch], 4),
+        "best_val_acc": round(hist["val_masked_accuracy"][best_epoch], 4),
         "test_exact": round(exact, 4),
         "test_cer": round(cer, 4),
         "minutes": round(minutes, 1),
@@ -299,6 +335,10 @@ def main():
     parser.add_argument("--limit", type=int, default=None,
                         help="rows per split, for a quick test run")
     args = parser.parse_args()
+    if args.epochs < 1 or args.batch_size < 1 or args.emb < 1 or args.hid < 1:
+        parser.error("--epochs, --batch-size, --emb, and --hid must be positive")
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
 
     ciphers = args.ciphers or ask_user_for_ciphers()
 
@@ -321,7 +361,7 @@ def main():
                      tablefmt="github")
     print("\n" + table)
 
-    RESULTS_DIR.mkdir(exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     summary_path = RESULTS_DIR / "combined_summary.md"
     summary_path.write_text(table + "\n", encoding="utf-8")
     print(f"\nsaved summary to {summary_path}")
