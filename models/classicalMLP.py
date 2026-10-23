@@ -10,7 +10,7 @@ from tabulate import tabulate
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" if (BASE_DIR / "data").exists() else BASE_DIR.parent / "data"
-RESULTS_DIR = BASE_DIR / "model_results" / "classicalMLP"
+RESULTS_DIR = BASE_DIR.parent / "model_results" / "classicalMLP_results"
 
 CIPHER_FILES = {
     "caesar": "caesar_gutenberg_50k.csv",
@@ -658,6 +658,10 @@ def main():
     if missing:
         raise FileNotFoundError(f"data file(s) not found in data/: {', '.join(missing)}")
 
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    for cipher in CIPHER_FILES:
+        (RESULTS_DIR / cipher).mkdir(exist_ok=True)
+
     all_sentences = unambiguous_sentences(load_source_sentences())
     index = build_nospace_lookup(all_sentences)
 
@@ -671,7 +675,6 @@ def main():
     table = tabulate([[r[h] for h in headers] for r in rows], headers=headers, tablefmt="github")
     print("\n" + table)
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     summary_path = RESULTS_DIR / "combined_summary.md"
     summary_path.write_text(table + "\n", encoding="utf-8")
     print(f"\nsaved summary to {summary_path}")
