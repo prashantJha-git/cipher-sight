@@ -263,13 +263,14 @@ class ClassicalMLP:
         self.total_reward += float(points[points > 0].sum())
         self.total_penalty += float(-points[points < 0].sum())
 
+        active = y.reshape(n, self.seq_len, self.vocab_size).argmax(axis=2) != STOI[PAD]
+        token_count = np.maximum(active.sum(axis=1, keepdims=True), 1)
         multiplier = np.where(
             correct,
             1.0 / (1.0 + self.reward_points),
             1.0 + self.penalty_points,
         )
-        active = y.reshape(n, self.seq_len, self.vocab_size).argmax(axis=2) != STOI[PAD]
-        multiplier *= active
+        multiplier = multiplier * active / token_count
         multiplier = np.repeat(multiplier, self.vocab_size, axis=1)
 
         output_error = (y - self.predicted_output) * multiplier
@@ -337,9 +338,10 @@ class ClassicalMLP:
             token_losses = -np.sum(
                 val_true_3d * np.log(val_pred_3d + 1e-9), axis=2
             )
-            val_loss = float(
-                np.sum(token_losses * val_active) / max(val_active.sum(), 1)
+            per_example_loss = np.sum(token_losses * val_active, axis=1) / np.maximum(
+                val_active.sum(axis=1), 1
             )
+            val_loss = float(np.mean(per_example_loss))
             val_correct, _ = self.reward_penalty(val_pred, y_val)
             val_acc = float(val_correct.sum() / max(val_active.sum(), 1))
 

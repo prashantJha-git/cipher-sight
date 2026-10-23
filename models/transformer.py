@@ -188,12 +188,39 @@ def masked_loss(y_true, y_pred):
 
 
 @keras.utils.register_keras_serializable(package="cipher")
-def masked_accuracy(y_true, y_pred):
-    """per-character accuracy that ignores <pad> positions"""
-    y_true = keras.ops.cast(y_true, "int32")
-    hit = keras.ops.cast(keras.ops.equal(y_true, keras.ops.argmax(y_pred, axis=-1)), "float32")
-    mask = keras.ops.cast(keras.ops.not_equal(y_true, 0), "float32")
-    return keras.ops.sum(hit * mask) / keras.ops.maximum(keras.ops.sum(mask), 1.0)
+class MaskedAccuracy(keras.metrics.Metric):
+    """character accuracy that ignores padding and aggregates across batches"""
+
+    def __init__(self, name="masked_accuracy", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.correct_tokens = self.add_weight(
+            name="correct_tokens", shape=(), initializer="zeros"
+        )
+        self.total_tokens = self.add_weight(
+            name="total_tokens", shape=(), initializer="zeros"
+        )
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = keras.ops.cast(y_true, "int32")
+        predicted = keras.ops.cast(keras.ops.argmax(y_pred, axis=-1), "int32")
+        mask = keras.ops.cast(keras.ops.not_equal(y_true, 0), self.dtype)
+        correct = keras.ops.cast(keras.ops.equal(y_true, predicted), self.dtype)
+
+        if sample_weight is not None:
+            sample_weight = keras.ops.cast(sample_weight, self.dtype)
+            if keras.ops.ndim(sample_weight) == 1:
+                sample_weight = sample_weight[:, None]
+            mask = mask * sample_weight
+
+        self.correct_tokens.assign_add(keras.ops.sum(correct * mask))
+        self.total_tokens.assign_add(keras.ops.sum(mask))
+
+    def result(self):
+        return keras.ops.divide_no_nan(self.correct_tokens, self.total_tokens)
+
+    def reset_state(self):
+        self.correct_tokens.assign(0.0)
+        self.total_tokens.assign(0.0)
 
 
 def feed_forward(x, d_model, d_ff, dropout):
@@ -333,7 +360,11 @@ def run_cipher(cipher, args, index, all_sentences):
 
     model = build_model(V, max_in, max_out, args)
     optimizer = keras.optimizers.Adam(learning_rate=args.lr, beta_2=0.98, clipnorm=1.0)
-    model.compile(optimizer=optimizer, loss=masked_loss, metrics=[masked_accuracy])
+    model.compile(
+        optimizer=optimizer,
+        loss=masked_loss,
+        metrics=[MaskedAccuracy()],
+    )
 
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
