@@ -14,7 +14,7 @@ from tabulate import tabulate
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" if (BASE_DIR / "data").exists() else BASE_DIR.parent / "data"
-RESULTS_DIR = BASE_DIR.parent / "model_results" / "bert_results"
+RESULTS_DIR = BASE_DIR.parent / "model_results" / "BERT_results"
 
 CIPHER_FILES = {
     "caesar": "caesar_gutenberg_50k.csv",
